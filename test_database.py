@@ -22,6 +22,17 @@ WHERE s.name = ? AND t.name = ?
 """
 
 
+def connection_string(server: str) -> str:
+    return (
+        f"DRIVER={{{DRIVER}}};"
+        f"SERVER={{{server.replace('}', '}}')}}};"
+        f"DATABASE={DATABASE};"
+        "Trusted_Connection=yes;"
+        "Encrypt=yes;"
+        "TrustServerCertificate=yes;"
+    )
+
+
 def main() -> int:
     server = os.environ.get("NPPES_SQL_SERVER", "").strip()
     if not server:
@@ -41,16 +52,8 @@ def main() -> int:
         print(f"Required ODBC driver is unavailable: {DRIVER}", file=sys.stderr)
         return 1
 
-    connection_string = (
-        f"DRIVER={{{DRIVER}}};"
-        f"SERVER={{{server.replace('}', '}}')}}};"
-        f"DATABASE={DATABASE};"
-        "Trusted_Connection=yes;"
-        "Encrypt=yes;"
-        "TrustServerCertificate=yes;"
-    )
     try:
-        connection = pyodbc.connect(connection_string, timeout=10, autocommit=True)
+        connection = pyodbc.connect(connection_string(server), timeout=10, autocommit=True)
     except pyodbc.Error as error:
         print(f"Could not connect to {DATABASE} on {server}: {error}", file=sys.stderr)
         return 1
