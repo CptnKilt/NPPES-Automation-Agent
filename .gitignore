@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# NPPES Automation Agent local files
+/downloads/
+.venv/
+.idea/
+*.py[cod]
+.env.*
+!.env.example
