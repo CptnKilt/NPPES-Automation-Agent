@@ -12,6 +12,26 @@ from zipfile import ZIP_DEFLATED, ZipFile
 DEFAULT_BACKUP_DIR = Path(__file__).resolve().parent / "backups"
 
 
+def write_table_backup(cursor, tables: tuple[str, ...], label: str) -> tuple[str, ...]:
+    created = datetime.now(UTC)
+    expected = {
+        table: cursor.execute(
+            f"SELECT COUNT_BIG(*) FROM {table} WITH (TABLOCKX, HOLDLOCK)"
+        ).fetchone()[0]
+        for table in tables
+    }
+    snapshots = []
+    for table, expected_count in expected.items():
+        name = table.rsplit(".", 1)[1].strip("[]")
+        snapshot = f"[dedup].[{name}_Backup_{label}_{created:%Y%m%dT%H%M%S%fZ}]"
+        cursor.execute(f"SELECT * INTO {snapshot} FROM {table}")
+        count = cursor.execute(f"SELECT COUNT_BIG(*) FROM {snapshot}").fetchone()[0]
+        if count != expected_count:
+            raise ValueError(f"{snapshot} has {count:,} rows. Expected {expected_count:,}.")
+        snapshots.append(snapshot)
+    return tuple(snapshots)
+
+
 def encode_value(value):
     if isinstance(value, date):
         return value.isoformat()
