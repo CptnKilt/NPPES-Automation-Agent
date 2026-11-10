@@ -88,6 +88,16 @@ DATE_COLUMNS = (
 )
 
 
+class ProviderRecordError(ValueError):
+    def __init__(self, number: int, line: int, field: str | None, reason: str):
+        self.number = number
+        self.line = line
+        self.field = field
+        self.reason = reason
+        location = f"Provider record {number:,} (CSV line {line:,})"
+        super().__init__(f"{location}: {field}: {reason}" if field else f"{location}: {reason}")
+
+
 @contextmanager
 def open_provider_csv(path: Path):
     with ZipFile(path) as archive:
@@ -110,15 +120,26 @@ def open_provider_csv(path: Path):
 
 
 def provider_records(reader, indexes: dict[str, int], field_count: int):
-    for number, row in enumerate(reader, start=1):
+    number = 0
+    while True:
+        line = reader.line_num + 1
+        number += 1
+        try:
+            row = next(reader, None)
+        except csv.Error:
+            raise ProviderRecordError(number, line, None, "Malformed CSV record.") from None
+        if row is None:
+            return
         if len(row) != field_count:
-            raise ValueError(f"Provider record {number} has the wrong number of fields.")
+            raise ProviderRecordError(
+                number, line, None, f"Expected {field_count} fields, found {len(row)}."
+            )
         npi = row[indexes["NPI"]]
         if len(npi) != 10 or not npi.isascii() or not npi.isdigit():
-            raise ValueError(f"Provider record {number} has an invalid NPI.")
+            raise ProviderRecordError(number, line, "NPI", "Expected ten ASCII digits.")
         entity_type = row[indexes["EntityType"]]
         if entity_type not in ("", "1", "2"):
-            raise ValueError(f"Provider record {number} has an invalid entity type.")
+            raise ProviderRecordError(number, line, "EntityType", "Expected 1, 2, or an empty value.")
 
         record = {column: row[index] or None for column, index in indexes.items()}
         record["EntityType"] = int(entity_type) if entity_type else None
@@ -128,7 +149,7 @@ def provider_records(reader, indexes: dict[str, int], field_count: int):
                 try:
                     record[column] = datetime.strptime(value, "%m/%d/%Y").date()
                 except ValueError:
-                    raise ValueError(f"Provider record {number} has an invalid {column}.") from None
+                    raise ProviderRecordError(number, line, column, "Expected a valid MM/DD/YYYY date.") from None
         yield record
 
 

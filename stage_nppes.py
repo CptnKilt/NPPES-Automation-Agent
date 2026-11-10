@@ -2,20 +2,42 @@
 
 import argparse
 import csv
+import json
 import os
 import sys
 from contextlib import closing
 from itertools import batched, islice
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from zipfile import BadZipFile
 
-from inspect_nppes import DETAIL_FIELDS, REFERENCE_FIELDS, open_provider_csv
+from inspect_nppes import DETAIL_FIELDS, REFERENCE_FIELDS, ProviderRecordError, open_provider_csv
 from test_database import connection_string
 
 
 REFERENCE_TABLE = "[dedup].[NPPES_Reference_Staging]"
 DETAIL_TABLE = "[dedup].[NPPES_Provider_Details_Staging]"
 BATCH_SIZE = 1_000
+REPORT_DIR = Path(__file__).resolve().parent / "reports"
+
+
+def write_rejection_report(archive: Path, member: str, error: ProviderRecordError) -> Path:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report = {
+        "archive": archive.name,
+        "csv": member,
+        "record_number": error.number,
+        "csv_start_line": error.line,
+        "field": error.field,
+        "reason": error.reason,
+    }
+    with NamedTemporaryFile(
+        dir=REPORT_DIR, prefix="nppes-rejected-", suffix=".json", mode="w",
+        encoding="utf-8", delete=False,
+    ) as output:
+        json.dump(report, output, indent=2)
+        output.write("\n")
+        return Path(output.name)
 
 
 def insert_sql(table: str, fields: dict[str, str]) -> str:
@@ -95,7 +117,7 @@ def main() -> int:
         parser.error("--sample-rows must be positive")
 
     try:
-        with open_provider_csv(args.archive) as (_, _, records):
+        with open_provider_csv(args.archive) as (member, _, records):
             if args.stage:
                 count = load_staging(records)
                 print(f"Committed {count:,} rows to each Dev staging table.")
@@ -104,6 +126,15 @@ def main() -> int:
                 if not count:
                     raise ValueError("The primary provider CSV has no data records.")
                 print(f"Dry run validated {count:,} provider records. No database connection was made.")
+    except ProviderRecordError as error:
+        print(f"Could not stage the NPPES release: {error}", file=sys.stderr)
+        try:
+            report = write_rejection_report(args.archive, member, error)
+        except OSError as report_error:
+            print(f"Could not write the rejection report: {report_error}", file=sys.stderr)
+        else:
+            print(f"Rejection report: {report}", file=sys.stderr)
+        return 1
     except (OSError, BadZipFile, csv.Error, ValueError) as error:
         print(f"Could not stage the NPPES release: {error}", file=sys.stderr)
         return 1
