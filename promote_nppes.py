@@ -6,9 +6,11 @@ import re
 import sys
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
-from backup_nppes import DEFAULT_BACKUP_DIR, write_backup
+from backup_nppes import DEFAULT_BACKUP_DIR, write_backup, write_table_backup
+from download_nppes import MONTHLY_ARCHIVE, MONTHS
 from inspect_nppes import DETAIL_FIELDS, REFERENCE_FIELDS
 from stage_nppes import DETAIL_TABLE, REFERENCE_TABLE
 from test_database import connection_string
@@ -16,6 +18,19 @@ from test_database import connection_string
 
 REFERENCE_TARGET = "[dedup].[NPPES_Reference]"
 DETAIL_TARGET = "[dedup].[NPPES_Provider_Details]"
+HISTORY_TABLE = "[dedup].[NPPES_Import_History]"
+
+
+def release_name(source_url: str) -> str:
+    url = urlsplit(source_url)
+    archive = MONTHLY_ARCHIVE.fullmatch(url.path)
+    if (
+        url.scheme != "https" or url.netloc != "download.cms.gov"
+        or archive is None or archive[1] not in MONTHS
+        or len(source_url.encode("utf-16-le")) // 2 > 2_000
+    ):
+        raise ValueError("Use the official monthly CMS Version 2 ZIP URL as --source-url.")
+    return url.path.rsplit("/", 1)[1]
 
 
 def validate_staging(cursor, expected_rows: int) -> None:
@@ -69,18 +84,39 @@ def upsert(cursor, staging: str, target: str, fields: dict[str, str], timestamp:
         raise ValueError(f"{target} is missing staged NPIs after promotion.")
 
 
-def promote(connection, expected_rows: int, backup_label: str | None, backup_dir: Path) -> None:
+def promote(
+    connection, expected_rows: int, backup_label: str | None, backup_dir: Path,
+    source_url: str | None, backup_mode: str,
+) -> None:
     try:
         with closing(connection.cursor()) as cursor:
             cursor.execute("SET LOCK_TIMEOUT 30000; SET XACT_ABORT ON;")
             validate_staging(cursor, expected_rows)
             if backup_label is not None:
+                if source_url is None:
+                    raise ValueError("Live promotion requires the CMS source URL.")
+                release = release_name(source_url)
+                prior = cursor.execute(f"""
+                    SELECT 1 FROM {HISTORY_TABLE} WITH (UPDLOCK, HOLDLOCK)
+                    WHERE ReleaseName = ?
+                """, release).fetchone()
+                if prior is not None:
+                    raise ValueError(f"{release} is already in import history.")
                 print("Staging checks passed. Backing up both Dev final tables.", flush=True)
-                backup = write_backup(cursor, (REFERENCE_TARGET, DETAIL_TARGET), backup_label, backup_dir)
-                print(f"Verified backup: {backup}", flush=True)
+                targets = (REFERENCE_TARGET, DETAIL_TARGET)
+                if backup_mode == "tables":
+                    snapshots = write_table_backup(cursor, targets, backup_label)
+                    print(f"Verified backup tables (pending commit): {', '.join(snapshots)}", flush=True)
+                else:
+                    backup = write_backup(cursor, targets, backup_label, backup_dir)
+                    print(f"Verified backup: {backup}", flush=True)
                 upsert(cursor, REFERENCE_TABLE, REFERENCE_TARGET, REFERENCE_FIELDS, "LastUpdated")
                 print("Reference checks passed. Updating the Dev provider details table.", flush=True)
                 upsert(cursor, DETAIL_TABLE, DETAIL_TARGET, DETAIL_FIELDS, "ImportedUTC")
+                cursor.execute(f"""
+                    INSERT INTO {HISTORY_TABLE} (ReleaseName, RecordCount, SourceURL)
+                    VALUES (?, ?, ?)
+                """, release, expected_rows, source_url)
         if backup_label is not None:
             connection.commit()
         else:
@@ -96,6 +132,9 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="Commit the verified release to the Dev final tables.")
     parser.add_argument("--backup-label", help="Prior release label, required with --apply.")
     parser.add_argument("--backup-dir", type=Path, default=DEFAULT_BACKUP_DIR, help="Local backup directory.")
+    parser.add_argument("--backup-mode", choices=("zip", "tables"), default="zip",
+                        help="Backup destination for --apply (default: zip).")
+    parser.add_argument("--source-url", help="Official CMS monthly ZIP URL, required with --apply.")
     args = parser.parse_args()
     if args.expected_rows < 1:
         parser.error("--expected-rows must be positive")
@@ -103,6 +142,13 @@ def main() -> int:
         parser.error("--apply requires a --backup-label of up to 64 letters, digits, underscores, or hyphens")
     if not args.apply and args.backup_label is not None:
         parser.error("--backup-label is only used with --apply")
+    if args.apply:
+        try:
+            release_name(args.source_url or "")
+        except ValueError as error:
+            parser.error(str(error))
+    elif args.source_url is not None or args.backup_mode != "zip":
+        parser.error("--source-url and --backup-mode tables are only used with --apply")
 
     server = os.environ.get("NPPES_SQL_SERVER", "").strip()
     if not server:
@@ -116,7 +162,10 @@ def main() -> int:
 
     try:
         with closing(pyodbc.connect(connection_string(server), timeout=10, autocommit=False)) as connection:
-            promote(connection, args.expected_rows, args.backup_label, args.backup_dir)
+            promote(
+                connection, args.expected_rows, args.backup_label, args.backup_dir,
+                args.source_url, args.backup_mode,
+            )
     except (pyodbc.Error, OSError, BadZipFile, TypeError, ValueError) as error:
         print(f"Could not promote the NPPES release: {error}", file=sys.stderr)
         return 1
