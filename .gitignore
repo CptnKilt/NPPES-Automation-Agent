@@ -221,6 +221,7 @@ __marimo__/
 
 # NPPES Automation Agent local files
 /downloads/
+/backups/
 .venv/
 .idea/
 *.py[cod]

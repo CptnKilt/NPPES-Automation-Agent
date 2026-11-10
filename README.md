@@ -7,9 +7,10 @@
 | 1. Database connectivity | **Complete** | Verify Windows Authentication and read access to all three NPPES tables in Dev. |
 | 2. Monthly CMS download | **Complete** | Find and download the monthly NPPES Version 2 full replacement ZIP, validate the archive, and skip releases already downloaded and verified. [CMS NPI download files](https://download.cms.gov/nppes/NPI_Files.html) |
 | 3. File inspection and mapping | **Complete** | Map the primary provider CSV to Dev, verify keys and column widths, and check a sample of the November release. |
-| 4. SQL Server import | **In progress** | Load and validate both Dev staging tables, then promote the validated release to the main tables in one transaction. |
-| 5. Import verification and history | Planned | Reconcile row counts, report rejected rows, and record each release and its outcome in the import history table. |
+| 4. SQL Server import | **Complete** | Load and validate both Dev staging tables, then promote the validated release to the main tables in one transaction. |
+| 5. Import verification, history, and backups | Planned | Reconcile row counts, report rejected rows, record the import outcome, and verify a recoverable backup of the prior release before future promotions. |
 | 6. Monthly scheduling and monitoring | Planned | Schedule the end-to-end job and document how to monitor results, respond to failures, and rerun a release. |
+| 7. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
 
 ## Phase 1 — Database connectivity
 
@@ -77,7 +78,19 @@ python stage_nppes.py downloads/NPPES_Data_Dissemination_November_2026_V2.zip --
 
 Omit `--sample-rows` to validate the full CSV locally. The explicit `--stage` option instead streams the full release into `dedup.NPPES_Reference_Staging` and `dedup.NPPES_Provider_Details_Staging`. It requires the Dev connection settings from Phase 1 and both staging tables to be empty. It commits only after row counts and NPI sets agree. A failure rolls back both inserts.
 
-The November sample dry run passed. Live staging and promotion to the main tables are pending.
+The full November 2026 dry run passed CSV structure and format checks for 9,891,116 provider records. The live Dev load committed 9,891,116 rows to each staging table after verifying row counts and matching NPI sets. The load took about 2 hours and 19 minutes. Promotion then committed in about 3 minutes and 19 seconds after confirming that both final tables contained all staged NPIs.
+
+Check the committed staging tables before promotion:
+
+```powershell
+python promote_nppes.py --expected-rows 9891116
+```
+
+Use the row count reported by the staging loader for the release being promoted. To promote, add `--apply --backup-label <prior-release>`, where the label identifies the release currently in the final tables. For example, use `--backup-label 2026-11` when November is the prior release.
+
+Before updating either final table, the script locks both tables and streams their current rows into a ZIP under the Git-ignored `backups/` folder. Use `--backup-dir` to select a different approved location. The ZIP contains a manifest with the release label, column names and types, and row counts. Each table is stored as UTF-8 JSON Lines with values in manifest order, ISO dates and timestamps, and explicit JSON nulls. The script verifies the row counts and ZIP integrity before it updates either final table. Plan for extra time and local disk space because both tables are exported while the locks are held.
+
+Promotion updates changed rows and inserts new NPIs in one transaction. It checks that every staged NPI is present before committing. Existing NPIs absent from staging are preserved, and staging remains available for reconciliation. The backup remains available if a subsequent promotion step fails. Backup creation was added after the November promotion and verified with fixtures. A live backup and restore rehearsal are pending.
 
 ## Branches
 
