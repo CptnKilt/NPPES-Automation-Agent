@@ -10,7 +10,7 @@ from http.client import HTTPException
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.parse import urljoin, urlsplit
-from urllib.request import urlopen
+from urllib.request import HTTPRedirectHandler, build_opener
 from zipfile import BadZipFile, ZipFile
 from zlib import error as ZlibError
 
@@ -24,10 +24,27 @@ MONTHLY_ARCHIVE = re.compile(
 PROVIDER_CSV = re.compile(r"npidata_pfile_[0-9]{8}-[0-9]{8}\.csv", re.IGNORECASE)
 
 
+def check_cms_url(url: str, expected_path: str) -> None:
+    parts = urlsplit(url)
+    if parts.scheme != "https" or parts.netloc != "download.cms.gov" or parts.path != expected_path:
+        raise ValueError("Blocked a destination outside the selected CMS listing or archive.")
+
+
+class CMSRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        check_cms_url(newurl, urlsplit(req.full_url).path)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def open_cms(url: str, timeout: int):
+    return build_opener(CMSRedirectHandler()).open(url, timeout=timeout)
+
+
 class ArchiveLinks(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.releases: dict[tuple[int, int], str] = {}
+        self.blocked_releases: set[tuple[int, int]] = set()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a":
@@ -38,12 +55,25 @@ class ArchiveLinks(HTMLParser):
 
         url = urljoin(CMS_INDEX, href)
         parts = urlsplit(url)
-        if parts.scheme != "https" or parts.netloc != "download.cms.gov":
-            return
-
-        match = MONTHLY_ARCHIVE.fullmatch(parts.path)
+        match = MONTHLY_ARCHIVE.fullmatch("/nppes/" + parts.path.rsplit("/", 1)[-1])
         if match is not None and match[1] in MONTHS:
-            self.releases[int(match[2]), MONTHS[match[1]]] = parts._replace(fragment="").geturl()
+            period = int(match[2]), MONTHS[match[1]]
+            try:
+                check_cms_url(url, match[0])
+            except ValueError:
+                self.blocked_releases.add(period)
+            else:
+                self.releases[period] = parts._replace(fragment="").geturl()
+
+
+def fetch_archive_links() -> ArchiveLinks:
+    with open_cms(CMS_INDEX, timeout=60) as response:
+        encoding = response.headers.get_content_charset() or "utf-8"
+        page = response.read().decode(encoding)
+    links = ArchiveLinks()
+    links.feed(page)
+    links.close()
+    return links
 
 
 def is_valid_archive(path: Path) -> bool:
@@ -58,18 +88,22 @@ def is_valid_archive(path: Path) -> bool:
         return False
 
 
-def download_archive(url: str, directory: Path) -> None:
+def download_archive(url: str, directory: Path) -> Path:
+    path = urlsplit(url).path
+    if MONTHLY_ARCHIVE.fullmatch(path) is None:
+        raise ValueError("Expected a CMS monthly Version 2 archive URL.")
+    check_cms_url(url, path)
     directory.mkdir(parents=True, exist_ok=True)
-    destination = directory / Path(urlsplit(url).path).name
+    destination = directory / Path(path).name
     if destination.is_file() and is_valid_archive(destination):
         print(f"Already downloaded and validated: {destination}")
-        return
+        return destination
 
     print(f"Downloading {destination.name}...", flush=True)
     with NamedTemporaryFile(dir=directory, suffix=".part", delete=False) as partial:
         partial_path = Path(partial.name)
         try:
-            with urlopen(url, timeout=60) as response:
+            with open_cms(url, timeout=60) as response:
                 shutil.copyfileobj(response, partial, length=1024 * 1024)
             partial.close()
             if not is_valid_archive(partial_path):
@@ -80,6 +114,7 @@ def download_archive(url: str, directory: Path) -> None:
             partial_path.unlink(missing_ok=True)
 
     print(f"Downloaded and validated: {destination}")
+    return destination
 
 
 def main() -> int:
@@ -88,12 +123,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        with urlopen(CMS_INDEX, timeout=30) as response:
-            encoding = response.headers.get_content_charset() or "utf-8"
-            page = response.read().decode(encoding)
-        links = ArchiveLinks()
-        links.feed(page)
-        links.close()
+        links = fetch_archive_links()
     except (OSError, HTTPException, ValueError, LookupError) as error:
         print(f"Could not read the CMS NPPES download index: {error}", file=sys.stderr)
         return 1

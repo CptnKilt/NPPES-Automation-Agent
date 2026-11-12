@@ -223,6 +223,7 @@ __marimo__/
 /downloads/
 /backups/
 /reports/
+/monthly-work/
 .venv/
 .idea/
 *.py[cod]

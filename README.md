@@ -9,7 +9,7 @@
 | 3. File inspection and mapping | **Complete** | Map the primary provider CSV to Dev, verify keys and column widths, and check a sample of the November release. |
 | 4. SQL Server import | **Complete** | Load and validate both Dev staging tables, then promote the validated release to the main tables in one transaction. |
 | 5. Import verification, history, and backups | **Complete** | Reconcile row counts, report rejected rows, record the import outcome, and verify a recoverable backup of the prior release before future promotions. |
-| 6. Monthly scheduling and monitoring | Planned | Schedule the end-to-end job and document how to monitor results, respond to failures, and rerun a release. |
+| 6. Monthly scheduling and monitoring | **In progress** | Run the pipeline from Windows Task Scheduler and monitor daily attempts, release state, and import outcomes. |
 | 7. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
 
 ## Phase 1 — Database connectivity
@@ -103,6 +103,29 @@ The live Dev rehearsal reused the committed November 2026 staging data. It finis
 A separate end-to-end rehearsal downloaded and validated a fresh November ZIP, then loaded and promoted all 9,891,116 provider records through isolated Dev tables. A fresh connection verified both final row counts, exact backups of the 100-row baseline in each table, and one matching import-history entry. The SQL phase took about 2 hours and 40 minutes. The rehearsal tables were removed afterward.
 
 If CSV record validation fails, the staging loader stops and writes a JSON report under the Git-ignored `reports/` folder. It identifies the first rejected record by archive, CSV member, record number, starting line, field when available, and reason. Provider values are omitted. During live staging, the load rolls back. Archive, header, and database errors are reported separately because they may have no identifiable CSV record.
+
+## Phase 6 — Monthly scheduling and monitoring
+
+The [monthly import skill](skills/nppes-monthly-import/SKILL.md) describes the operating rules. The Windows runner checks the current Eastern-time month, retries transient CMS failures up to four times with ten minutes between attempts, and stops polling once the archive is verified. A completed month exits before contacting CMS.
+
+On the intended Windows host, install the dependencies in the project virtual environment. The scheduled check runs daily at 6:00 a.m. Eastern. The registration script uses the signed-in Windows account, which must have access to the company network or VPN. After a reboot, sign in again if Windows has returned to the sign-in screen.
+
+```powershell
+python -m pip install pyodbc tzdata
+.\register_monthly_task.ps1 -SqlServer 'your-sql-server-hostname' -BackupMode tables -ReadinessOnly
+```
+
+Review the readiness task's last run result and `monthly-work/monthly.log`. Exit code 0 indicates the CMS and Dev checks passed. Exit code 1 indicates a deployment blocker. To repeat the test, start the existing `NPPES Monthly Import Readiness` task from Task Scheduler. After the checks pass, register the daily task:
+
+```powershell
+.\register_monthly_task.ps1 -CheckTime '06:00' -SqlServer 'your-sql-server-hostname' -BackupMode tables
+```
+
+Before enabling the schedule, reconcile any staging rows left by earlier manual imports. The automated loader starts with empty staging. It loads and validates the release, backs up both final tables, promotes the rows, records import history, and truncates both staging tables before committing the SQL transaction. If any step fails, SQL Server rolls back the transaction. The scheduled account needs `ALTER` on both staging tables, plus the existing load, promotion, and backup permissions. If import history is empty, pass `--initial-backup-label` on the first live run to identify the data being backed up.
+
+Review `monthly-work/monthly.log`, `monthly-work/state.json`, and Task Scheduler's last run result. A processing failure requires operator review. After resolving the issue, rerun `python run_monthly_nppes.py --resume` with the same SQL Server, backup mode, and work directory. The runner checks committed import history before retrying. Rejected CSV records are recorded under `reports/`. Outbound notices remain phase-seven work.
+
+A one-time Task Scheduler test on the development PC launched Python 3.14.4 under the intended Windows account, reached the CMS listing, and wrote a local readiness log. Before the one-time Dev staging cleanup, the November history entry and staged NPIs were checked against the final tables. A fresh connection verified that both staging tables were empty and November history remained intact. The follow-up readiness check passed on the PC. The scheduled readiness test on the server is pending.
 
 ## Branches
 

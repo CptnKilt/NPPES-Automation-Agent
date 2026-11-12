@@ -21,6 +21,10 @@ BATCH_SIZE = 1_000
 REPORT_DIR = Path(__file__).resolve().parent / "reports"
 
 
+class StagingOccupiedError(ValueError):
+    """The existing staged release must be reconciled before loading."""
+
+
 def write_rejection_report(archive: Path, member: str, error: ProviderRecordError) -> Path:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     report = {
@@ -54,7 +58,7 @@ def stage_records(connection, records) -> int:
                 f"SELECT COUNT_BIG(*) FROM {table} WITH (TABLOCKX, HOLDLOCK)"
             ).fetchone()[0]
             if count:
-                raise ValueError(f"{table} already contains rows. Existing staging data was preserved.")
+                raise StagingOccupiedError(f"{table} already contains rows. Existing staging data was preserved.")
 
         reference_insert = insert_sql(REFERENCE_TABLE, REFERENCE_FIELDS)
         detail_insert = insert_sql(DETAIL_TABLE, DETAIL_FIELDS)
