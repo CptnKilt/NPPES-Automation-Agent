@@ -86,7 +86,7 @@ def upsert(cursor, staging: str, target: str, fields: dict[str, str], timestamp:
 
 def promote(
     connection, expected_rows: int, backup_label: str | None, backup_dir: Path,
-    source_url: str | None, backup_mode: str,
+    source_url: str | None, backup_mode: str, *, clear_staging: bool = False,
 ) -> None:
     try:
         with closing(connection.cursor()) as cursor:
@@ -117,6 +117,9 @@ def promote(
                     INSERT INTO {HISTORY_TABLE} (ReleaseName, RecordCount, SourceURL)
                     VALUES (?, ?, ?)
                 """, release, expected_rows, source_url)
+                if clear_staging:
+                    cursor.execute(f"TRUNCATE TABLE {DETAIL_TABLE}")
+                    cursor.execute(f"TRUNCATE TABLE {REFERENCE_TABLE}")
         if backup_label is not None:
             connection.commit()
         else:
