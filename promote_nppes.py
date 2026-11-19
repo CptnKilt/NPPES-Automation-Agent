@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
 from backup_nppes import DEFAULT_BACKUP_DIR, write_backup, write_table_backup
-from download_nppes import MONTHLY_ARCHIVE, MONTHS
+from download_nppes import MONTHLY_ARCHIVE, MONTHS, WEEKLY_ARCHIVE
 from inspect_nppes import DETAIL_FIELDS, REFERENCE_FIELDS
 from stage_nppes import DETAIL_TABLE, REFERENCE_TABLE
 from test_database import connection_string
@@ -24,12 +24,13 @@ HISTORY_TABLE = "[dedup].[NPPES_Import_History]"
 def release_name(source_url: str) -> str:
     url = urlsplit(source_url)
     archive = MONTHLY_ARCHIVE.fullmatch(url.path)
+    weekly = WEEKLY_ARCHIVE.fullmatch(url.path)
     if (
         url.scheme != "https" or url.netloc != "download.cms.gov"
-        or archive is None or archive[1] not in MONTHS
+        or (weekly is None and (archive is None or archive[1] not in MONTHS))
         or len(source_url.encode("utf-16-le")) // 2 > 2_000
     ):
-        raise ValueError("Use the official monthly CMS Version 2 ZIP URL as --source-url.")
+        raise ValueError("Use an official monthly or weekly CMS Version 2 ZIP URL as --source-url.")
     return url.path.rsplit("/", 1)[1]
 
 

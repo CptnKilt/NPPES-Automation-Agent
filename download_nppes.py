@@ -5,6 +5,7 @@ import re
 import shutil
 import sys
 from calendar import month_name
+from datetime import datetime
 from html.parser import HTMLParser
 from http.client import HTTPException
 from pathlib import Path
@@ -20,6 +21,9 @@ DOWNLOAD_DIR = Path(__file__).resolve().parent / "downloads"
 MONTHS = {name: number for number, name in enumerate(month_name) if number}
 MONTHLY_ARCHIVE = re.compile(
     r"/nppes/NPPES_Data_Dissemination_([A-Za-z]+)_([0-9]{4})_V2\.zip"
+)
+WEEKLY_ARCHIVE = re.compile(
+    r"/nppes/NPPES_Data_Dissemination_([0-9]{6})_([0-9]{6})_Weekly_V2\.zip"
 )
 PROVIDER_CSV = re.compile(r"npidata_pfile_[0-9]{8}-[0-9]{8}\.csv", re.IGNORECASE)
 
@@ -45,6 +49,8 @@ class ArchiveLinks(HTMLParser):
         super().__init__()
         self.releases: dict[tuple[int, int], str] = {}
         self.blocked_releases: set[tuple[int, int]] = set()
+        self.weekly_releases: dict[tuple, str] = {}
+        self.blocked_weeklies: set[tuple] = set()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a":
@@ -55,6 +61,19 @@ class ArchiveLinks(HTMLParser):
 
         url = urljoin(CMS_INDEX, href)
         parts = urlsplit(url)
+        weekly = WEEKLY_ARCHIVE.fullmatch("/nppes/" + parts.path.rsplit("/", 1)[-1])
+        if weekly is not None:
+            start = datetime.strptime(weekly[1], "%m%d%y").date()
+            end = datetime.strptime(weekly[2], "%m%d%y").date()
+            if start > end:
+                raise ValueError("CMS weekly archive has an invalid date range.")
+            try:
+                check_cms_url(url, weekly[0])
+            except ValueError:
+                self.blocked_weeklies.add((start, end))
+            else:
+                self.weekly_releases[start, end] = parts._replace(fragment="").geturl()
+            return
         match = MONTHLY_ARCHIVE.fullmatch("/nppes/" + parts.path.rsplit("/", 1)[-1])
         if match is not None and match[1] in MONTHS:
             period = int(match[2]), MONTHS[match[1]]
@@ -90,8 +109,8 @@ def is_valid_archive(path: Path) -> bool:
 
 def download_archive(url: str, directory: Path) -> Path:
     path = urlsplit(url).path
-    if MONTHLY_ARCHIVE.fullmatch(path) is None:
-        raise ValueError("Expected a CMS monthly Version 2 archive URL.")
+    if MONTHLY_ARCHIVE.fullmatch(path) is None and WEEKLY_ARCHIVE.fullmatch(path) is None:
+        raise ValueError("Expected a CMS monthly or weekly Version 2 archive URL.")
     check_cms_url(url, path)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / Path(path).name
