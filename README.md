@@ -12,7 +12,8 @@
 | 6. Monthly scheduling and monitoring | **In progress** | Run the pipeline from Windows Task Scheduler and monitor daily attempts, release state, and import outcomes. |
 | 7. Preserve deactivated provider details | **In progress** | Preserve existing provider details when an NPI deactivates, apply its deactivation information, and handle reactivation. |
 | 8. Weekly incremental updates | **In progress** | Discover and process weekly releases in order, track their coverage, and coordinate them with the monthly baseline. |
-| 9. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
+| 9. Import all provider columns | **In progress** | Import all 330 main-provider CSV columns, expand the final and staging schemas, and verify wider imports and backups. |
+| 10. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
 
 ## Phase 1 — Database connectivity
 
@@ -60,7 +61,7 @@ The November 2026 primary provider CSV has 330 columns and is about 11.8 GB unco
 python inspect_nppes.py downloads/NPPES_Data_Dissemination_November_2026_V2.zip
 ```
 
-All 3 reference mappings and 115 provider-detail mappings matched the live Dev column names. The first 10,000 November records passed inspection and fit the Dev text column widths.
+The initial 3 reference mappings and 115 provider-detail mappings matched the live Dev column names. The first 10,000 November records passed inspection and fit the Dev text column widths. Phase 9 expands the provider-detail mapping to all 330 source columns.
 
 | Dev table | Source and key |
 | --- | --- |
@@ -125,7 +126,7 @@ Review the readiness task's last run result and `monthly-work/monthly.log`. Exit
 
 Before enabling the schedule, reconcile any staging rows left by earlier manual imports. The automated loader starts with empty staging. It loads and validates the release, backs up both final tables, promotes the rows, records import history, and truncates both staging tables before committing the SQL transaction. If any step fails, SQL Server rolls back the transaction. The scheduled account needs `ALTER` on both staging tables, plus the existing load, promotion, and backup permissions. If import history is empty, pass `--initial-backup-label` on the first live run to identify the data being backed up.
 
-Review `monthly-work/monthly.log`, `monthly-work/state.json`, and Task Scheduler's last run result. A processing failure requires operator review. After resolving the issue, rerun `python run_monthly_nppes.py --resume` with the same SQL Server, backup mode, and work directory. The runner checks committed import history before retrying. Rejected CSV records are recorded under `reports/`. Outbound notices remain phase-nine work.
+Review `monthly-work/monthly.log`, `monthly-work/state.json`, and Task Scheduler's last run result. A processing failure requires operator review. After resolving the issue, rerun `python run_monthly_nppes.py --resume` with the same SQL Server, backup mode, and work directory. The runner checks committed import history before retrying. Rejected CSV records are recorded under `reports/`. Outbound notices remain phase-ten work.
 
 A one-time Task Scheduler test on the development PC launched Python 3.14.4 under the intended Windows account, reached the CMS listing, and wrote a local readiness log. Before the one-time Dev staging cleanup, the November history entry and staged NPIs were checked against the final tables. A fresh connection verified that both staging tables were empty and November history remained intact. The follow-up readiness check passed on the PC. The scheduled readiness test on the server is pending.
 
@@ -150,6 +151,27 @@ The job continues checking for eligible weeklies after the monthly import comple
 Weekly release state is stored in `monthly-work/weekly-state.json`. A weekly processing failure stops subsequent weeks and requires operator review followed by `--resume --include-weekly`. Committed SQL history resolves a restart after commit. The weekly option is pending server deployment and live-run verification.
 
 Both November weekly archives passed full CSV validation, with 31,562 and 29,288 provider records. A SQL rehearsal imported them in date order through uniquely named temporary tables. It verified 59,934 distinct final NPIs, two import-history entries, preservation of an existing deactivated provider's details, and empty staging after each promotion. All temporary tables were removed afterward. Automated regression checks cover ordered selection, overlapping coverage, missing weeks, blocked hosts, shared retry limits, monthly coverage protection, commit recovery, and stopping on a failed week.
+
+## Phase 9 — Import all provider columns
+
+The provider-details mapping now covers every one of the 330 columns in the main provider CSV. The 215 added fields contain 50 groups of other-provider identifiers, type codes, states, and issuers, plus 15 taxonomy groups. Both provider-details tables have these source columns plus `ImportedUTC`, for a total of 331 columns. Leading zeroes in identifiers and type codes are stored as text.
+
+The migration adds nullable `nvarchar` fields to the existing tables and verifies compatible definitions on reruns. The added fields use CMS's documented maximum lengths of 20, 2, 2, and 80 for identifier groups and 70 for taxonomy groups. The CSV validator checks these limits in UTF-16 units and reports the first overlength record. [CMS file layout](https://www.cms.gov/regulations-and-guidance/administrative-simplification/nationalprovidentstand/downloads/data_dissemination_file-readme.pdf)
+
+Inspect the required changes before deploying to another database environment:
+
+```powershell
+python migrate_provider_columns.py --sql-server your-sql-server-hostname
+python migrate_provider_columns.py --sql-server your-sql-server-hostname --apply
+```
+
+Apply the schema migration before running the expanded importer. The migration targets the configured Dev database and changes both provider-details tables in one transaction. Readiness checks and import entry points verify the expanded definitions.
+
+An isolated SQL rehearsal verified migration, idempotent reruns, preservation of existing rows, a 1,001-record import, active-source values, a 331-column backup, and preservation of all added fields during deactivation. All 330 headers matched the monthly and weekly files. The monthly sample and both complete weekly files passed CSV validation.
+
+The Dev migration added 215 nullable fields to each provider-details table. Verification found 331 columns in each table, 9,891,116 rows in the final table, and zero staging rows. A second migration inspection reported zero columns to add. An isolated failure test confirmed that an incompatible definition in the second table rolls back the first table's additions.
+
+Existing provider rows receive NULL in the newly added columns until they are imported again. A full monthly import is required to populate the added fields for the full active-provider population. Weekly imports populate only the NPIs in those updates. Previously suppressed details for deactivated NPIs require an earlier source or backup. Full-volume performance and server deployment remain pending, so Phase 9 stays in progress.
 
 ## Branches
 

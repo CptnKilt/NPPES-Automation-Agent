@@ -12,6 +12,7 @@ from zipfile import BadZipFile
 from backup_nppes import DEFAULT_BACKUP_DIR, write_backup, write_table_backup
 from download_nppes import MONTHLY_ARCHIVE, MONTHS, WEEKLY_ARCHIVE
 from inspect_nppes import DETAIL_FIELDS, REFERENCE_FIELDS
+from migrate_provider_columns import validate_provider_columns
 from stage_nppes import DETAIL_TABLE, REFERENCE_TABLE
 from test_database import connection_string
 
@@ -124,6 +125,8 @@ def promote(
             cursor.execute("SET LOCK_TIMEOUT 30000; SET XACT_ABORT ON;")
             validate_staging(cursor, expected_rows)
             if backup_label is not None:
+                validate_provider_columns(cursor, DETAIL_TABLE)
+                validate_provider_columns(cursor, DETAIL_TARGET)
                 if source_url is None:
                     raise ValueError("Live promotion requires the CMS source URL.")
                 release = release_name(source_url)
