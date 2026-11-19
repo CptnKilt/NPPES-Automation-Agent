@@ -10,7 +10,9 @@
 | 4. SQL Server import | **Complete** | Load and validate both Dev staging tables, then promote the validated release to the main tables in one transaction. |
 | 5. Import verification, history, and backups | **Complete** | Reconcile row counts, report rejected rows, record the import outcome, and verify a recoverable backup of the prior release before future promotions. |
 | 6. Monthly scheduling and monitoring | **In progress** | Run the pipeline from Windows Task Scheduler and monitor daily attempts, release state, and import outcomes. |
-| 7. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
+| 7. Preserve deactivated provider details | **In progress** | Preserve existing provider details when an NPI deactivates, apply its deactivation information, and handle reactivation. |
+| 8. Weekly incremental updates | Planned | Discover and process weekly releases in order, track their coverage, and coordinate them with the monthly baseline. |
+| 9. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
 
 ## Phase 1 — Database connectivity
 
@@ -123,9 +125,17 @@ Review the readiness task's last run result and `monthly-work/monthly.log`. Exit
 
 Before enabling the schedule, reconcile any staging rows left by earlier manual imports. The automated loader starts with empty staging. It loads and validates the release, backs up both final tables, promotes the rows, records import history, and truncates both staging tables before committing the SQL transaction. If any step fails, SQL Server rolls back the transaction. The scheduled account needs `ALTER` on both staging tables, plus the existing load, promotion, and backup permissions. If import history is empty, pass `--initial-backup-label` on the first live run to identify the data being backed up.
 
-Review `monthly-work/monthly.log`, `monthly-work/state.json`, and Task Scheduler's last run result. A processing failure requires operator review. After resolving the issue, rerun `python run_monthly_nppes.py --resume` with the same SQL Server, backup mode, and work directory. The runner checks committed import history before retrying. Rejected CSV records are recorded under `reports/`. Outbound notices remain phase-seven work.
+Review `monthly-work/monthly.log`, `monthly-work/state.json`, and Task Scheduler's last run result. A processing failure requires operator review. After resolving the issue, rerun `python run_monthly_nppes.py --resume` with the same SQL Server, backup mode, and work directory. The runner checks committed import history before retrying. Rejected CSV records are recorded under `reports/`. Outbound notices remain phase-nine work.
 
 A one-time Task Scheduler test on the development PC launched Python 3.14.4 under the intended Windows account, reached the CMS listing, and wrote a local readiness log. Before the one-time Dev staging cleanup, the November history entry and staged NPIs were checked against the final tables. A fresh connection verified that both staging tables were empty and November history remained intact. The follow-up readiness check passed on the PC. The scheduled readiness test on the server is pending.
+
+## Phase 7 — Preserve deactivated provider details
+
+For an existing NPI, promotion treats an incoming record as deactivated when it has a deactivation date and its reactivation date is absent or no later than that deactivation date. It preserves the existing provider details and applies the incoming deactivation date. It applies a supplied deactivation reason and retains the existing reason when the source reason is missing. The reference table retains its existing entity type when a deactivated source omits it.
+
+An incoming record with a reactivation date later than its deactivation date follows normal provider updates. A record with no deactivation date also follows normal updates, including clearing fields when the active source contains blanks. Previously unseen NPIs are inserted with the information available in the source.
+
+The update timestamp changes only when an effective stored value changes. Synthetic SQL tests using the complete Dev column definitions passed for field preservation, missing reasons, repeated imports, reactivation, subsequent deactivation, active updates, and previously unseen deactivated NPIs. The test used session-local tables and rolled back afterward. Phase 7 remains in progress until its behavior is verified in a live import. The change still needs deployment to the scheduled server before December's import. Existing data already absent from the final tables can only be recovered from an earlier source or backup.
 
 ## Branches
 
