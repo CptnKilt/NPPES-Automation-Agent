@@ -26,7 +26,7 @@ description: Run the NPPES Automation Agent's monthly CMS release check and SQL 
 
 ## SQL Server processing
 
-1. Use the repository's validated download, staging, and promotion workflow. Check ZIP integrity, confirm the primary provider CSV is present, and validate the required mapped headers before loading provider rows.
+1. Use the repository's validated download, staging, and promotion workflow. Check ZIP integrity, confirm the primary provider CSV is present, and validate all 330 mapped provider headers before loading provider rows. Verify the Phase 9 schema migration has added the 215 additional fields to both provider-details tables. Preserve identifier and type-code leading zeroes as text.
 2. Use the configured SQL Server connection. Load the primary provider records into the two NPPES staging tables. Verify record counts and matching NPIs. Stop if existing staging data cannot be safely attributed to this release.
 3. Back up both final tables using the configured backup mode. Promote validated rows into `dedup.NPPES_Reference` and `dedup.NPPES_Provider_Details`. Verify promotion, record the release in `dedup.NPPES_Import_History`, and truncate both staging tables before committing the transaction.
 4. Treat a release already recorded in import history as complete. If a connection fails around commit, check history before retrying or sending a success notice.

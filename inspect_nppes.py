@@ -83,6 +83,22 @@ for slot in range(1, 16):
         f"PrimaryTaxonomy_{slot}": f"Healthcare Provider Primary Taxonomy Switch_{slot}",
     })
 
+ADDITIONAL_DETAIL_COLUMNS = {}
+for slot in range(1, 51):
+    for column, header, length in (
+        ("OtherProviderIdentifier", "Other Provider Identifier", 20),
+        ("OtherProviderIdentifierType", "Other Provider Identifier Type Code", 2),
+        ("OtherProviderIdentifierState", "Other Provider Identifier State", 2),
+        ("OtherProviderIdentifierIssuer", "Other Provider Identifier Issuer", 80),
+    ):
+        name = f"{column}_{slot}"
+        DETAIL_FIELDS[name] = f"{header}_{slot}"
+        ADDITIONAL_DETAIL_COLUMNS[name] = length
+for slot in range(1, 16):
+    name = f"TaxonomyGroup_{slot}"
+    DETAIL_FIELDS[name] = f"Healthcare Provider Taxonomy Group_{slot}"
+    ADDITIONAL_DETAIL_COLUMNS[name] = 70
+
 DATE_COLUMNS = (
     "EnumerationDate", "LastUpdateDate", "DeactivationDate", "ReactivationDate", "CertificationDate"
 )
@@ -142,6 +158,12 @@ def provider_records(reader, indexes: dict[str, int], field_count: int):
             raise ProviderRecordError(number, line, "EntityType", "Expected 1, 2, or an empty value.")
 
         record = {column: row[index] or None for column, index in indexes.items()}
+        for column, length in ADDITIONAL_DETAIL_COLUMNS.items():
+            value = record[column]
+            if value is not None and len(value.encode("utf-16-le")) // 2 > length:
+                raise ProviderRecordError(
+                    number, line, column, f"Value exceeds the SQL column limit of {length} UTF-16 units."
+                )
         record["EntityType"] = int(entity_type) if entity_type else None
         for column in DATE_COLUMNS:
             value = record[column]

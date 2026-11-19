@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from download_nppes import download_archive, fetch_archive_links, is_valid_archive
 from inspect_nppes import ProviderRecordError, open_provider_csv
+from migrate_provider_columns import validate_provider_columns
 from promote_nppes import DETAIL_TARGET, HISTORY_TABLE, REFERENCE_TARGET, promote
 from stage_nppes import DETAIL_TABLE, REFERENCE_TABLE, StagingOccupiedError, stage_records, write_rejection_report
 from test_database import connection_string
@@ -93,6 +94,12 @@ def check_readiness(args, today: datetime) -> int:
                 (DETAIL_TARGET, ("SELECT", "INSERT", "UPDATE")),
                 (HISTORY_TABLE, ("SELECT", "INSERT")),
             ):
+                if table in (DETAIL_TABLE, DETAIL_TARGET):
+                    try:
+                        validate_provider_columns(cursor, table)
+                    except ValueError as error:
+                        LOG.error("%s", error)
+                        ready = False
                 for permission in permissions:
                     granted = cursor.execute(
                         "SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', ?)", table, permission
