@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from download_nppes import download_archive, fetch_archive_links, is_valid_archive
 from inspect_nppes import ProviderRecordError, open_provider_csv
+from migrate_provider_columns import validate_provider_columns
 from promote_nppes import DETAIL_TARGET, HISTORY_TABLE, REFERENCE_TARGET, promote
 from stage_nppes import DETAIL_TABLE, REFERENCE_TABLE, StagingOccupiedError, stage_records, write_rejection_report
 from test_database import connection_string
@@ -93,6 +94,12 @@ def check_readiness(args, today: datetime) -> int:
                 (DETAIL_TARGET, ("SELECT", "INSERT", "UPDATE")),
                 (HISTORY_TABLE, ("SELECT", "INSERT")),
             ):
+                if table in (DETAIL_TABLE, DETAIL_TARGET):
+                    try:
+                        validate_provider_columns(cursor, table)
+                    except ValueError as error:
+                        LOG.error("%s", error)
+                        ready = False
                 for permission in permissions:
                     granted = cursor.execute(
                         "SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', ?)", table, permission
@@ -118,10 +125,16 @@ def check_readiness(args, today: datetime) -> int:
     return 0 if ready else 1
 
 
-def acquire_archive(args, state_path: Path, state: dict, today: datetime, now):
+def acquire_archive(args, state_path: Path, state: dict, today: datetime, now, select_release=None):
     day = today.date().isoformat()
     if state.get("day") != day:
         state.update(day=day, attempts=0, status="waiting", retry_at=None)
+    budget_path = args.work_dir / "cms-attempts.json"
+    budget = json.loads(budget_path.read_text(encoding="utf-8")) if budget_path.exists() else {}
+    if budget.get("day") == day:
+        state["attempts"] = max(state["attempts"], budget["attempts"])
+        if budget.get("retry_at"):
+            state["retry_at"] = budget["retry_at"]
     if state["status"] in ("unpublished", "download_error"):
         return None, int(state["status"] == "download_error")
 
@@ -135,22 +148,27 @@ def acquire_archive(args, state_path: Path, state: dict, today: datetime, now):
 
         state["attempts"] += 1
         state["retry_at"] = (now().astimezone(UTC) + RETRY_INTERVAL).isoformat()
+        save_state(budget_path, {"day": day, "attempts": state["attempts"],
+                                 "retry_at": state["retry_at"]})
         save_state(state_path, state)
         step = "download" if state.get("url") else "listing"
         LOG.info("%s %s attempt %d", state["period"], step, state["attempts"])
         try:
             if step == "listing":
                 links = fetch_archive_links()
-                period = today.year, today.month
-                if period in links.blocked_releases:
-                    raise JobError("Current monthly link is outside the CMS download boundary.")
-                if not links.releases:
-                    raise JobError("Monthly Version 2 listing could not be recognized.")
-                state["url"] = links.releases.get(period)
+                if select_release is None:
+                    period = today.year, today.month
+                    if period in links.blocked_releases:
+                        raise JobError("Current monthly link is outside the CMS download boundary.")
+                    if not links.releases:
+                        raise JobError("Monthly Version 2 listing could not be recognized.")
+                    state["url"] = links.releases.get(period)
+                else:
+                    state["url"] = select_release(links)
                 if not state["url"]:
                     state["status"] = "unpublished"
                     save_state(state_path, state)
-                    LOG.info("%s monthly release is not yet published", state["period"])
+                    LOG.info("%s no eligible release is currently listed", state["period"])
                     return None, 0
                 step = "download"
                 save_state(state_path, state)
@@ -163,14 +181,36 @@ def acquire_archive(args, state_path: Path, state: dict, today: datetime, now):
                 save_state(state_path, state)
                 return None, 1
             state["retry_at"] = (now().astimezone(UTC) + RETRY_INTERVAL).isoformat()
+            save_state(budget_path, {"day": day, "attempts": state["attempts"],
+                                     "retry_at": state["retry_at"]})
             save_state(state_path, state)
         else:
             state.update(status="ready", archive=archive.name)
+            save_state(budget_path, {"day": day, "attempts": state["attempts"], "retry_at": None})
             save_state(state_path, state)
             LOG.info("%s archive verified: %s", state["period"], archive.name)
             return archive, 0
     LOG.error("%s daily CMS attempt budget exhausted", state["period"])
     return None, 1
+
+
+def process_release(args, settings: str, archive: Path, url: str, backup_label: str) -> int:
+    import pyodbc
+
+    try:
+        with closing(pyodbc.connect(settings, timeout=10, autocommit=False)) as connection:
+            try:
+                with open_provider_csv(archive) as (member, _, records):
+                    count = stage_records(connection, records)
+                promote(connection, count, backup_label, args.work_dir / "backups",
+                        url, args.backup_mode, clear_staging=True)
+            except BaseException:
+                connection.rollback()
+                raise
+    except ProviderRecordError as error:
+        LOG.info("Rejection report: %s", write_rejection_report(archive, member, error))
+        raise
+    return count
 
 
 def run(args, state_path: Path, now) -> int:
@@ -216,24 +256,16 @@ def run(args, state_path: Path, now) -> int:
             return code
     state["status"] = "processing"
     save_state(state_path, state)
-    step = "staging"
     try:
-        with closing(pyodbc.connect(settings, timeout=10, autocommit=False)) as connection:
-            try:
-                with open_provider_csv(archive) as (member, _, records):
-                    count = stage_records(connection, records)
-                step = "promotion"
-                promote(connection, count, backup_label, args.work_dir / "backups",
-                        state["url"], args.backup_mode, clear_staging=True)
-            except BaseException:
-                connection.rollback()
-                raise
+        if args.include_weekly:
+            from weekly_nppes import check_monthly_coverage
+
+            check_monthly_coverage(settings, archive)
+        count = process_release(args, settings, archive, state["url"], backup_label)
     except Exception as error:
         state["status"] = "processing_failed"
         save_state(state_path, state)
-        LOG.error("%s %s failed (%s)", period, step, error_summary(error))
-        if isinstance(error, ProviderRecordError):
-            LOG.info("Rejection report: %s", write_rejection_report(archive, member, error))
+        LOG.error("%s import failed (%s)", period, error_summary(error))
         return 1
 
     save_state(state_path, {"period": period, "status": "complete"})
@@ -247,6 +279,8 @@ def main() -> int:
     parser.add_argument("--sql-server", help="SQL Server hostname, or set NPPES_SQL_SERVER.")
     parser.add_argument("--backup-mode", choices=("zip", "tables"), default="zip")
     parser.add_argument("--initial-backup-label", help="Prior release label if import history is empty.")
+    parser.add_argument("--include-weekly", action="store_true",
+                        help="After the current monthly baseline is complete, process weekly updates.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--resume", action="store_true", help="Retry an interrupted current-month import.")
     mode.add_argument("--readiness-only", action="store_true", help="Check CMS and Dev with read-only requests.")
@@ -272,7 +306,13 @@ def main() -> int:
         try:
             if args.readiness_only:
                 return check_readiness(args, datetime.now(eastern))
-            return run(args, args.work_dir / "state.json", lambda: datetime.now(eastern))
+            now = lambda: datetime.now(eastern)
+            code = run(args, args.work_dir / "state.json", now)
+            if code == 0 and args.include_weekly:
+                from weekly_nppes import run_weekly
+
+                return run_weekly(args, now)
+            return code
         except Exception as error:
             LOG.error("Monthly job stopped (%s)", error_summary(error))
             return 1

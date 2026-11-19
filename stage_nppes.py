@@ -12,6 +12,7 @@ from tempfile import NamedTemporaryFile
 from zipfile import BadZipFile
 
 from inspect_nppes import DETAIL_FIELDS, REFERENCE_FIELDS, ProviderRecordError, open_provider_csv
+from migrate_provider_columns import validate_provider_columns
 from test_database import connection_string
 
 
@@ -53,6 +54,7 @@ def insert_sql(table: str, fields: dict[str, str]) -> str:
 def stage_records(connection, records) -> int:
     with closing(connection.cursor()) as cursor:
         cursor.execute("SET LOCK_TIMEOUT 30000; SET XACT_ABORT ON;")
+        validate_provider_columns(cursor, DETAIL_TABLE)
         for table in (REFERENCE_TABLE, DETAIL_TABLE):
             count = cursor.execute(
                 f"SELECT COUNT_BIG(*) FROM {table} WITH (TABLOCKX, HOLDLOCK)"

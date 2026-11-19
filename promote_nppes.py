@@ -10,8 +10,9 @@ from urllib.parse import urlsplit
 from zipfile import BadZipFile
 
 from backup_nppes import DEFAULT_BACKUP_DIR, write_backup, write_table_backup
-from download_nppes import MONTHLY_ARCHIVE, MONTHS
+from download_nppes import MONTHLY_ARCHIVE, MONTHS, WEEKLY_ARCHIVE
 from inspect_nppes import DETAIL_FIELDS, REFERENCE_FIELDS
+from migrate_provider_columns import validate_provider_columns
 from stage_nppes import DETAIL_TABLE, REFERENCE_TABLE
 from test_database import connection_string
 
@@ -24,12 +25,13 @@ HISTORY_TABLE = "[dedup].[NPPES_Import_History]"
 def release_name(source_url: str) -> str:
     url = urlsplit(source_url)
     archive = MONTHLY_ARCHIVE.fullmatch(url.path)
+    weekly = WEEKLY_ARCHIVE.fullmatch(url.path)
     if (
         url.scheme != "https" or url.netloc != "download.cms.gov"
-        or archive is None or archive[1] not in MONTHS
+        or (weekly is None and (archive is None or archive[1] not in MONTHS))
         or len(source_url.encode("utf-16-le")) // 2 > 2_000
     ):
-        raise ValueError("Use the official monthly CMS Version 2 ZIP URL as --source-url.")
+        raise ValueError("Use an official monthly or weekly CMS Version 2 ZIP URL as --source-url.")
     return url.path.rsplit("/", 1)[1]
 
 
@@ -55,10 +57,40 @@ def upsert(cursor, staging: str, target: str, fields: dict[str, str], timestamp:
     columns = ", ".join(f"[{name}]" for name in fields)
     values = ", ".join(f"src.[{name}]" for name in fields)
     data_columns = [name for name in fields if name != "NPI"]
-    assignments = ", ".join(f"[{name}] = src.[{name}]" for name in data_columns)
+    deactivated = "src.[DeactivationDate] IS NOT NULL"
+    if "ReactivationDate" in fields:
+        deactivated += (
+            " AND (src.[ReactivationDate] IS NULL"
+            " OR src.[ReactivationDate] <= src.[DeactivationDate])"
+        )
+    effective_values = {}
+    for name in data_columns:
+        if name == "DeactivationDate":
+            effective_values[name] = f"src.[{name}]"
+        elif "ReactivationDate" not in fields:
+            # Reference staging has no reactivation date. Retain missing entity types
+            # on deactivation while accepting an entity type supplied on reactivation.
+            effective_values[name] = (
+                f"CASE WHEN {deactivated} THEN COALESCE(src.[{name}], dst.[{name}])"
+                f" ELSE src.[{name}] END"
+            )
+        elif name == "DeactivationReason":
+            effective_values[name] = (
+                f"CASE WHEN {deactivated} THEN COALESCE(src.[{name}], dst.[{name}])"
+                f" ELSE src.[{name}] END"
+            )
+        else:
+            effective_values[name] = (
+                f"CASE WHEN {deactivated} THEN dst.[{name}] ELSE src.[{name}] END"
+            )
+    assignments = ", ".join(
+        f"[{name}] = {effective_values[name]}" for name in data_columns
+    )
 
     # Compare the encoded values so case, accents, and trailing spaces remain significant.
-    source_values = ", ".join(f"CONVERT(varbinary(max), src.[{name}])" for name in data_columns)
+    source_values = ", ".join(
+        f"CONVERT(varbinary(max), {effective_values[name]})" for name in data_columns
+    )
     target_values = ", ".join(f"CONVERT(varbinary(max), dst.[{name}])" for name in data_columns)
     cursor.execute(f"""
         UPDATE dst
@@ -93,6 +125,8 @@ def promote(
             cursor.execute("SET LOCK_TIMEOUT 30000; SET XACT_ABORT ON;")
             validate_staging(cursor, expected_rows)
             if backup_label is not None:
+                validate_provider_columns(cursor, DETAIL_TABLE)
+                validate_provider_columns(cursor, DETAIL_TARGET)
                 if source_url is None:
                     raise ValueError("Live promotion requires the CMS source URL.")
                 release = release_name(source_url)
