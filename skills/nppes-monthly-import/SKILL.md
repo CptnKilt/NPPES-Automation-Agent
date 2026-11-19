@@ -31,6 +31,8 @@ description: Run the NPPES Automation Agent's monthly CMS release check and SQL 
 3. Back up both final tables using the configured backup mode. Promote validated rows into `dedup.NPPES_Reference` and `dedup.NPPES_Provider_Details`. Verify promotion, record the release in `dedup.NPPES_Import_History`, and truncate both staging tables before committing the transaction.
 4. Treat a release already recorded in import history as complete. If a connection fails around commit, check history before retrying or sending a success notice.
 
+For existing NPIs that deactivate, preserve provider details while applying the supplied deactivation date and reason. Retain the previous reason when the source omits it. A later reactivation date allows normal provider updates again. Use the promotion script's effective-value comparison so unchanged deactivation records retain their update timestamps.
+
 ## Notifications
 
 - Use the configured channel and approved recipient list. Send **NPPES tables updated — <Month Year>** after confirming the SQL transaction committed. Include completion time and the committed row count.

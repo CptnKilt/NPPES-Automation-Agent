@@ -55,10 +55,40 @@ def upsert(cursor, staging: str, target: str, fields: dict[str, str], timestamp:
     columns = ", ".join(f"[{name}]" for name in fields)
     values = ", ".join(f"src.[{name}]" for name in fields)
     data_columns = [name for name in fields if name != "NPI"]
-    assignments = ", ".join(f"[{name}] = src.[{name}]" for name in data_columns)
+    deactivated = "src.[DeactivationDate] IS NOT NULL"
+    if "ReactivationDate" in fields:
+        deactivated += (
+            " AND (src.[ReactivationDate] IS NULL"
+            " OR src.[ReactivationDate] <= src.[DeactivationDate])"
+        )
+    effective_values = {}
+    for name in data_columns:
+        if name == "DeactivationDate":
+            effective_values[name] = f"src.[{name}]"
+        elif "ReactivationDate" not in fields:
+            # Reference staging has no reactivation date. Retain missing entity types
+            # on deactivation while accepting an entity type supplied on reactivation.
+            effective_values[name] = (
+                f"CASE WHEN {deactivated} THEN COALESCE(src.[{name}], dst.[{name}])"
+                f" ELSE src.[{name}] END"
+            )
+        elif name == "DeactivationReason":
+            effective_values[name] = (
+                f"CASE WHEN {deactivated} THEN COALESCE(src.[{name}], dst.[{name}])"
+                f" ELSE src.[{name}] END"
+            )
+        else:
+            effective_values[name] = (
+                f"CASE WHEN {deactivated} THEN dst.[{name}] ELSE src.[{name}] END"
+            )
+    assignments = ", ".join(
+        f"[{name}] = {effective_values[name]}" for name in data_columns
+    )
 
     # Compare the encoded values so case, accents, and trailing spaces remain significant.
-    source_values = ", ".join(f"CONVERT(varbinary(max), src.[{name}])" for name in data_columns)
+    source_values = ", ".join(
+        f"CONVERT(varbinary(max), {effective_values[name]})" for name in data_columns
+    )
     target_values = ", ".join(f"CONVERT(varbinary(max), dst.[{name}])" for name in data_columns)
     cursor.execute(f"""
         UPDATE dst
