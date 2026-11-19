@@ -9,7 +9,9 @@ param(
     [ValidateSet('zip', 'tables')]
     [string]$BackupMode = 'zip',
 
-    [switch]$ReadinessOnly
+    [switch]$ReadinessOnly,
+
+    [switch]$IncludeWeekly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +31,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $arguments = '-B "{0}" --sql-server "{1}" --backup-mode {2}' -f $runner, $SqlServer, $BackupMode
+if ($IncludeWeekly) { $arguments += ' --include-weekly' }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive
 if ($ReadinessOnly) {

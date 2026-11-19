@@ -11,7 +11,7 @@
 | 5. Import verification, history, and backups | **Complete** | Reconcile row counts, report rejected rows, record the import outcome, and verify a recoverable backup of the prior release before future promotions. |
 | 6. Monthly scheduling and monitoring | **In progress** | Run the pipeline from Windows Task Scheduler and monitor daily attempts, release state, and import outcomes. |
 | 7. Preserve deactivated provider details | **In progress** | Preserve existing provider details when an NPI deactivates, apply its deactivation information, and handle reactivation. |
-| 8. Weekly incremental updates | Planned | Discover and process weekly releases in order, track their coverage, and coordinate them with the monthly baseline. |
+| 8. Weekly incremental updates | **In progress** | Discover and process weekly releases in order, track their coverage, and coordinate them with the monthly baseline. |
 | 9. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
 
 ## Phase 1 — Database connectivity
@@ -136,6 +136,20 @@ For an existing NPI, promotion treats an incoming record as deactivated when it 
 An incoming record with a reactivation date later than its deactivation date follows normal provider updates. A record with no deactivation date also follows normal updates, including clearing fields when the active source contains blanks. Previously unseen NPIs are inserted with the information available in the source.
 
 The update timestamp changes only when an effective stored value changes. Synthetic SQL tests using the complete Dev column definitions passed for field preservation, missing reasons, repeated imports, reactivation, subsequent deactivation, active updates, and previously unseen deactivated NPIs. The test used session-local tables and rolled back afterward. Phase 7 remains in progress until its behavior is verified in a live import. The change still needs deployment to the scheduled server before December's import. Existing data already absent from the final tables can only be recovered from an earlier source or backup.
+
+## Phase 8 — Weekly incremental updates
+
+The daily runner accepts `--include-weekly`. The scheduler registration script accepts `-IncludeWeekly` when weekly processing is ready to deploy. The same task and work-directory lock coordinate both monthly and weekly imports.
+
+After the current month's full release is recorded in history, weekly processing reads the monthly provider CSV's end date to establish coverage. On its first run, it may download the imported monthly ZIP to determine that date. It then selects all available Version 2 weekly files whose end dates extend coverage and imports them oldest first. An overlapping first week is eligible. A missing week stops processing before any later week is applied. Each weekly release receives its own committed history entry.
+
+Each weekly import uses the existing staging, validation, prior-data backup, promotion, and transactional staging truncation. Deactivated records retain the provider details required by Phase 7. The configured backup mode applies to every weekly import, so table mode creates a pair of full prior-data snapshots for each imported week.
+
+The job continues checking for eligible weeklies after the monthly import completes. At the start of a new month, it waits for that month's baseline before applying further weekly files. A monthly snapshot that predates a previously committed weekly end date requires operator review before promotion. This prevents the monthly snapshot from overwriting newer weekly updates. The shared `cms-attempts.json` file limits CMS attempts across both workflows to five per day.
+
+Weekly release state is stored in `monthly-work/weekly-state.json`. A weekly processing failure stops subsequent weeks and requires operator review followed by `--resume --include-weekly`. Committed SQL history resolves a restart after commit. The weekly option is pending server deployment and live-run verification.
+
+Both November weekly archives passed full CSV validation, with 31,562 and 29,288 provider records. A SQL rehearsal imported them in date order through uniquely named temporary tables. It verified 59,934 distinct final NPIs, two import-history entries, preservation of an existing deactivated provider's details, and empty staging after each promotion. All temporary tables were removed afterward. Automated regression checks cover ordered selection, overlapping coverage, missing weeks, blocked hosts, shared retry limits, monthly coverage protection, commit recovery, and stopping on a failed week.
 
 ## Branches
 
