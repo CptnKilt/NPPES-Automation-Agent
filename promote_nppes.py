@@ -92,16 +92,20 @@ def upsert(cursor, staging: str, target: str, fields: dict[str, str], timestamp:
         f"CONVERT(varbinary(max), {effective_values[name]})" for name in data_columns
     )
     target_values = ", ".join(f"CONVERT(varbinary(max), dst.[{name}])" for name in data_columns)
+    detail_audit = "ReactivationDate" in fields
+    audit_update = ", [LastUpdatedUTC] = SYSUTCDATETIME()" if detail_audit else ""
+    insert_columns = columns + (", [InsertedUTC], [LastUpdatedUTC]" if detail_audit else "")
+    insert_values = values + (", SYSUTCDATETIME(), SYSUTCDATETIME()" if detail_audit else "")
     cursor.execute(f"""
         UPDATE dst
-        SET {assignments}, [{timestamp}] = SYSUTCDATETIME()
+        SET {assignments}, [{timestamp}] = SYSUTCDATETIME(){audit_update}
         FROM {target} AS dst WITH (TABLOCKX, HOLDLOCK)
         JOIN {staging} AS src ON src.NPI = dst.NPI
         WHERE EXISTS (SELECT {source_values} EXCEPT SELECT {target_values})
     """)
     cursor.execute(f"""
-        INSERT INTO {target} ({columns})
-        SELECT {values}
+        INSERT INTO {target} ({insert_columns})
+        SELECT {insert_values}
         FROM {staging} AS src
         WHERE NOT EXISTS (
             SELECT 1 FROM {target} AS dst WITH (TABLOCKX, HOLDLOCK) WHERE dst.NPI = src.NPI
@@ -127,6 +131,8 @@ def promote(
             if backup_label is not None:
                 validate_provider_columns(cursor, DETAIL_TABLE)
                 validate_provider_columns(cursor, DETAIL_TARGET)
+                from migrate_provider_timestamps import validate_timestamps
+                validate_timestamps(cursor)
                 if source_url is None:
                     raise ValueError("Live promotion requires the CMS source URL.")
                 release = release_name(source_url)

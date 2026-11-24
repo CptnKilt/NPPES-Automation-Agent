@@ -97,6 +97,9 @@ def check_readiness(args, today: datetime) -> int:
                 if table in (DETAIL_TABLE, DETAIL_TARGET):
                     try:
                         validate_provider_columns(cursor, table)
+                        if table == DETAIL_TARGET:
+                            from migrate_provider_timestamps import validate_timestamps
+                            validate_timestamps(cursor)
                     except ValueError as error:
                         LOG.error("%s", error)
                         ready = False
