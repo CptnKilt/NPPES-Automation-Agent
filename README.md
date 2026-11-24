@@ -15,6 +15,26 @@
 | 9. Import all provider columns | **In progress** | Import all 330 main-provider CSV columns, expand the final and staging schemas, and verify wider imports and backups. |
 | 10. Completion notifications | Planned | Notify a designated recipient after the monthly import succeeds. Choose the recipient and delivery channel during this phase. |
 
+## Provider audit timestamps — server deployment pending
+
+The final provider-details table now requires nullable `datetime2(7)` audit fields:
+`InsertedUTC` records the first insertion by this application, and `LastUpdatedUTC`
+records insertion or the latest effective data change. Unchanged rows keep their
+timestamps. Existing rows retain NULL insertion times because their original
+insertion dates are unknown. The migration initializes their last-updated time
+from the existing `ImportedUTC` value, which remains maintained for compatibility.
+These UTC audit fields are separate from the dates supplied by CMS.
+
+Run `migrate_provider_timestamps.py --sql-server <server>` to preview, then add
+`--apply` to migrate the final details table transactionally. This can update
+millions of existing rows; run while the scheduled import is idle. Repeated
+migrations do not reset timestamps. Staging and historical backup tables are
+unchanged. Run readiness checks after migration, before deploying the updated
+importer. The Dev migration committed on November 24, 2026. A fresh connection
+verified 9,922,896 provider rows, all with NULL insertion times and populated
+last-updated times. Server deployment and live verification of future timestamp
+maintenance remain pending.
+
 ## Phase 1 — Database connectivity
 
 The database check uses Python 3.14.4, `pyodbc`, Microsoft ODBC Driver 17 for SQL Server, and Windows Authentication. Run it from the company network or while connected to the company VPN. The connection to the Dev database uses encryption and skips server certificate validation.
